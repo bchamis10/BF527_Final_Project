@@ -14,6 +14,8 @@ library(ggpubr)
 
 ```{r}
 # ---- Read expression data ----
+
+# Download series matrix from GEO for the selected experiment
 file <- "GSE76808_series_matrix.txt"
 
 expr <- read.table(file, 
@@ -73,26 +75,26 @@ expr_long_upreg <- expr_subset_upreg %>%
 # ---- Define pairwise comparisons ----
 comparisons <- list(c("control", "SSc-ILD"))
 
-# Aging genes with significance bars
+# ---- Aging genes boxplot with significance bars ----
 p_aging <- ggboxplot(expr_long_aging, x = "Condition", y = "Expression", fill = "Condition",
           palette = "jco", add = "jitter",
-          facet.by = "Gene", scales = "free_y") +
+          facet.by = "Gene", scales = "free_y", nrow = 1) +  # <--- all in one row
   stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + # adds 30% above max +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
   labs(title = "Expression of Aging Genes by Condition")
 
-# Upregulated genes with significance bars (already mostly correct)
+# ---- Upregulated genes with significance bars ----
 p_upreg <- ggboxplot(expr_long_upreg, x = "Condition", y = "Expression", fill = "Condition",
           palette = "jco", add = "jitter",
-          facet.by = "Gene", scales = "free_y") +
+          facet.by = "Gene", scales = "free_y", nrow = 1) +  # <--- all in one row
   stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + # adds 30% above max +
-  labs(title = "Expression of Aging Genes by Condition")
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
+  labs(title = "Expression of Upregulated Genes by Condition")
 
-ggsave("aging_genes.png", plot = p_aging, width = 8, height = 6, dpi = 300)
-ggsave("upregulated_genes.png", plot = p_upreg, width = 8, height = 6, dpi = 300)
+ggsave("aging_genes.png", plot = p_aging, width = 9, height = 3.5, dpi = 300)
+ggsave("upregulated_genes.png", plot = p_upreg, width = 9, height = 3.5, dpi = 300)
 ```
