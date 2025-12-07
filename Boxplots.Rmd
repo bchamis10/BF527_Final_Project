@@ -14,6 +14,7 @@ library(ggpubr)
 
 ```{r}
 # ---- Read expression data ----
+# Download series matrix file from GEO
 file <- "GSE76808_series_matrix.txt"
 
 expr <- read.table(file, 
@@ -80,7 +81,7 @@ p_aging <- ggboxplot(expr_long_aging, x = "Condition", y = "Expression", fill = 
   stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + # adds 30% above max +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
   labs(title = "Expression of Aging Genes by Condition")
 
 # Upregulated genes with significance bars (already mostly correct)
@@ -90,8 +91,8 @@ p_upreg <- ggboxplot(expr_long_upreg, x = "Condition", y = "Expression", fill = 
   stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + # adds 30% above max +
-  labs(title = "Expression of Aging Genes by Condition")
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
+  labs(title = "Expression of Upregulated Genes by Condition")
 
 ggsave("aging_genes.png", plot = p_aging, width = 8, height = 6, dpi = 300)
 ggsave("upregulated_genes.png", plot = p_upreg, width = 8, height = 6, dpi = 300)
