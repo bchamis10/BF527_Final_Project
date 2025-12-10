@@ -1,0 +1,8 @@
+"Type","Dataset","Model","ROC","Sens","Spec"
+"Within-Dataset CV","GSE76808","Random Forest",1,0.333333333333333,1
+"Within-Dataset CV","GSE76808","SVM",1,1,0.85
+"Within-Dataset CV","GSE48149","Random Forest",0.972222222222222,0.777777777777778,1
+"Within-Dataset CV","GSE48149","SVM",0.839285714285714,0.444444444444444,0.958333333333333
+"Within-Dataset CV","GSE48149","Logistic Regression",1,0.777777777777778,1
+"Within-Dataset CV","GSE81292","Random Forest",1,0.5,1
+"Within-Dataset CV","GSE81292","SVM",1,1,0.8
