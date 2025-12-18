@@ -1,5 +1,5 @@
 ---
-title: "GEO Expression Analysis - Boxplots"
+title: "GEO Expression Analysis - Z-score Normalized"
 output:
   pdf_document: default
   html_document: default
@@ -25,16 +25,38 @@ library(AnnotationDbi)  # Annotation database interface
 # ---- Read expression data ----
 # These are Series Matrix files downloaded from GEO
 # comment.char = "!" skips metadata lines at the top of the file
-GSE76808 <- read.table("GSE76808_series_matrix.txt", header = TRUE, row.names = 1,
+GSE76808 <- read.table("GEO_datasets/GSE76808_series_matrix.txt", header = TRUE, row.names = 1,
                        sep = "\t", comment.char = "!", check.names = FALSE)
-GSE48149 <- read.table("GSE48149_series_matrix.txt", header = TRUE, row.names = 1,
+GSE48149 <- read.table("GEO_datasets/GSE48149_series_matrix.txt", header = TRUE, row.names = 1,
                        sep = "\t", comment.char = "!", check.names = FALSE)
-GSE81292 <- read.table("GSE81292_series_matrix.txt", header = TRUE, row.names = 1,
+GSE81292 <- read.table("GEO_datasets/GSE81292_series_matrix.txt", header = TRUE, row.names = 1,
                        sep = "\t", comment.char = "!", check.names = FALSE)
 
 # Read metadata (sample sheet with Sample ID and Condition columns)
 metadata <- read.csv('samplesheet.csv', header = TRUE)
 ```
+
+```{r filter data}
+# ---- Filter expression data to only samples in metadata ----
+# This removes samples from unwanted groups
+
+samples_to_keep <- metadata$Sample
+
+cat("Original sample counts:\n")
+cat("GSE76808:", ncol(GSE76808), "samples\n")
+cat("GSE48149:", ncol(GSE48149), "samples\n")
+cat("GSE81292:", ncol(GSE81292), "samples\n\n")
+
+GSE76808 <- GSE76808 %>% dplyr::select(any_of(samples_to_keep))
+GSE48149 <- GSE48149 %>% dplyr::select(any_of(samples_to_keep))
+GSE81292 <- GSE81292 %>% dplyr::select(any_of(samples_to_keep))
+
+cat("After filtering to metadata samples:\n")
+cat("GSE76808:", ncol(GSE76808), "samples\n")
+cat("GSE48149:", ncol(GSE48149), "samples\n")
+cat("GSE81292:", ncol(GSE81292), "samples\n\n")
+```
+
 
 ```{r get-annotations}
 # ---- Download platform annotations ----
@@ -109,7 +131,8 @@ expr_long_76808 <- GSE76808_collapsed %>%
     names_to = "Sample",
     values_to = "Expression"
   ) %>%
-  left_join(metadata, by = "Sample")
+  left_join(metadata, by = "Sample") %>%
+  mutate(Dataset = "GSE76808")
 ```
 
 ```{r process-GSE48149}
@@ -145,7 +168,8 @@ expr_long_48149 <- GSE48149_collapsed %>%
     values_to = "Expression"
   ) %>%
   left_join(metadata, by = "Sample") %>%
-  filter(!is.na(Condition))
+  filter(!is.na(Condition)) %>%
+  mutate(Dataset = "GSE48149")
 ```
 
 ```{r process-GSE81292}
@@ -189,90 +213,203 @@ expr_long_81292 <- GSE81292_collapsed %>%
     values_to = "Expression"
   ) %>%
   left_join(metadata, by = "Sample") %>%
-  filter(!is.na(Condition))
+  filter(!is.na(Condition)) %>%
+  mutate(Dataset = "GSE81292")
+```
+
+```{r combine-and-normalize}
+# ---- Combine datasets and apply Z-score normalization ----
+
+# First, combine all raw expression data
+expr_combined_raw <- bind_rows(
+  expr_long_76808,
+  expr_long_48149,
+  expr_long_81292
+)
+
+# Set factor levels to ensure consistent ordering
+expr_combined_raw$Condition <- factor(expr_combined_raw$Condition, 
+                                      levels = c("control", "SSc-ILD"))
+expr_combined_raw$Dataset <- factor(expr_combined_raw$Dataset,
+                                    levels = c("GSE76808", "GSE48149", "GSE81292"))
+
+cat("Expression range before normalization:\n")
+expr_combined_raw %>%
+  group_by(Dataset) %>%
+  summarize(
+    Min = min(Expression, na.rm = TRUE),
+    Max = max(Expression, na.rm = TRUE),
+    Mean = mean(Expression, na.rm = TRUE),
+    Median = median(Expression, na.rm = TRUE)
+  ) %>%
+  print()
+
+# ---- Apply Z-score normalization within each dataset ----
+# This transforms each dataset to have mean=0 and SD=1
+# This makes datasets comparable while preserving relative differences
+expr_combined <- expr_combined_raw %>%
+  group_by(Dataset, Gene) %>%
+  mutate(Expression_zscore = scale(Expression)[,1]) %>%
+  ungroup()
+
+cat("\n\nExpression range after Z-score normalization:\n")
+expr_combined %>%
+  group_by(Dataset) %>%
+  summarize(
+    Min = min(Expression_zscore, na.rm = TRUE),
+    Max = max(Expression_zscore, na.rm = TRUE),
+    Mean = mean(Expression_zscore, na.rm = TRUE),
+    SD = sd(Expression_zscore, na.rm = TRUE)
+  ) %>%
+  print()
 ```
 
 ```{r verify-output}
 # ---- Verify the output ----
-cat("GSE76808 - Rows:", nrow(expr_long_76808), "Genes:", n_distinct(expr_long_76808$Gene), "\n")
-cat("GSE48149 - Rows:", nrow(expr_long_48149), "Genes:", n_distinct(expr_long_48149$Gene), "\n")
-cat("GSE81292 - Rows:", nrow(expr_long_81292), "Genes:", n_distinct(expr_long_81292$Gene), "\n")
+cat("\n\nCombined dataset summary:\n")
+cat("Total rows:", nrow(expr_combined), "\n")
+cat("Unique genes:", n_distinct(expr_combined$Gene), "\n")
+cat("Unique datasets:", n_distinct(expr_combined$Dataset), "\n\n")
+
+# Check counts by dataset
+expr_combined %>%
+  group_by(Dataset) %>%
+  summarize(
+    Rows = n(),
+    Genes = n_distinct(Gene),
+    Samples = n_distinct(Sample)
+  ) %>%
+  print()
 
 # List which genes are present in each dataset
-cat("\nGenes in GSE76808:", paste(sort(unique(expr_long_76808$Gene)), collapse=", "), "\n")
-cat("Genes in GSE48149:", paste(sort(unique(expr_long_48149$Gene)), collapse=", "), "\n")
-cat("Genes in GSE81292:", paste(sort(unique(expr_long_81292$Gene)), collapse=", "), "\n")
-
-# Identify missing genes
-cat("\nMissing from GSE76808:", paste(setdiff(genes_of_interest, unique(expr_long_76808$Gene)), collapse=", "), "\n")
-cat("Missing from GSE48149:", paste(setdiff(genes_of_interest, unique(expr_long_48149$Gene)), collapse=", "), "\n")
-cat("Missing from GSE81292:", paste(setdiff(genes_of_interest, unique(expr_long_81292$Gene)), collapse=", "), "\n")
+cat("\nGenes by dataset:\n")
+expr_combined %>%
+  group_by(Dataset) %>%
+  summarize(Genes = paste(sort(unique(Gene)), collapse=", ")) %>%
+  print()
 ```
 
-```{r boxplots}
-# ---- Create boxplots with significance testing ----
-# Define pairwise comparison for statistical testing
+```{r normalized-plots}
+# ---- Create plots with Z-score normalized data ----
+# Using base ggplot2 for better control over point positioning
+
 comparisons <- list(c("control", "SSc-ILD"))
 
-# GSE76808 boxplot
-# facet.by creates separate panels for each gene
-# scales = "free_y" allows each gene to have its own y-axis scale
-# This is important because genes have vastly different expression levels
-p_76808 <- ggboxplot(expr_long_76808, x = "Condition", y = "Expression", fill = "Condition",
-          palette = "jco", add = "jitter",
-          facet.by = "Gene", scales = "free_y", nrow = 2) +
-  stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
+# Main combined plot - each gene in one panel, all 3 studies side by side
+p_combined <- ggplot(expr_combined, aes(x = Dataset, y = Expression_zscore, fill = Condition)) +
+  geom_boxplot(position = position_dodge(0.75), outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+             size = 1.5, alpha = 0.6, shape = 21, color = "black", stroke = 0.3) +
+  stat_compare_means(aes(group = Condition), 
+                     method = "t.test", 
+                     label = "p.signif",
+                     label.y.npc = 0.95) +
+  facet_wrap(~ Gene, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = c("#0073C2FF", "#EFC000FF")) +  # jco palette colors
   theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +  # Add space for significance bars
-  labs(title = "GSE76808 - Gene Expression by Condition")
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "bottom"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15))) +
+  labs(
+    title = "Gene Expression Across Three Studies (Z-score Normalized)",
+    subtitle = "Z-score normalization enables cross-platform comparison",
+    x = "Dataset",
+    y = "Expression (Z-score)",
+    fill = "Condition"
+  )
 
-# GSE48149 boxplot
-p_48149 <- ggboxplot(expr_long_48149, x = "Condition", y = "Expression", fill = "Condition",
-          palette = "jco", add = "jitter",
-          facet.by = "Gene", scales = "free_y", nrow = 2) +
-  stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
-  labs(title = "GSE48149 - Gene Expression by Condition")
+ggsave("expression_plots/combined_genes_zscore.png", plot = p_combined, 
+       width = 12, height = 8, dpi = 300)
 
-# GSE81292 boxplot
-p_81292 <- ggboxplot(expr_long_81292, x = "Condition", y = "Expression", fill = "Condition",
-          palette = "jco", add = "jitter",
-          facet.by = "Gene", scales = "free_y", nrow = 2) +
-  stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
-  labs(title = "GSE81292 - Gene Expression by Condition")
-
-# Save plots as high-resolution PNG files
-ggsave("GSE76808_genes.png", plot = p_76808, width = 9, height = 6, dpi = 300)
-ggsave("GSE48149_genes.png", plot = p_48149, width = 9, height = 6, dpi = 300)
-ggsave("GSE81292_genes.png", plot = p_81292, width = 9, height = 6, dpi = 300)
-
-# Display plots
-p_76808
-p_48149
-p_81292
+print(p_combined)
 ```
 
-# Notes on Common Issues:
-# 
-# 1. **Missing genes**: Different microarray platforms measure different genes.
-#    Not all genes of interest may be present in all datasets.
-# 
-# 2. **Different y-axis scales**: This is expected! Genes have vastly different
-#    expression levels. Using free_y scales lets you see relative differences
-#    for each gene.
-# 
-# 3. **Namespace conflicts**: AnnotationDbi and dplyr both have a select() function.
-#    Use dplyr::select() to explicitly specify which one you want.
-# 
-# 4. **Column name issues**: Some annotation tables have spaces in column names
-#    (e.g., "Gene symbol"). Use bracket notation annot[["Gene symbol"]] or
-#    rename during the join to avoid backtick issues.
-# 
-# 5. **Platform-specific mapping**: Some platforms (like GPL18991) require
-#    additional steps to convert probe IDs to gene symbols via Entrez IDs.
+```{r individual-plots}
+# ---- Individual dataset plots with Z-score normalization ----
+
+expr_76808_norm <- expr_combined %>% filter(Dataset == "GSE76808")
+expr_48149_norm <- expr_combined %>% filter(Dataset == "GSE48149")
+expr_81292_norm <- expr_combined %>% filter(Dataset == "GSE81292")
+
+comparisons <- list(c("control", "SSc-ILD"))
+
+# GSE76808 (Z-score normalized)
+p_76808 <- ggplot(expr_76808_norm, aes(x = Condition, y = Expression_zscore, fill = Condition)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitter(width = 0.2),
+             size = 2, alpha = 0.6, shape = 21, color = "black", stroke = 0.3) +
+  stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
+  facet_wrap(~ Gene, scales = "free_y", nrow = 2) +
+  scale_fill_manual(values = c("#0073C2FF", "#EFC000FF")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  labs(title = "GSE76808 - Gene Expression (Z-score Normalized)",
+       y = "Expression (Z-score)")
+
+# GSE48149 (Z-score normalized)
+p_48149 <- ggplot(expr_48149_norm, aes(x = Condition, y = Expression_zscore, fill = Condition)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitter(width = 0.2),
+             size = 2, alpha = 0.6, shape = 21, color = "black", stroke = 0.3) +
+  stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
+  facet_wrap(~ Gene, scales = "free_y", nrow = 2) +
+  scale_fill_manual(values = c("#0073C2FF", "#EFC000FF")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
+  labs(title = "GSE48149 - Gene Expression (Z-score Normalized)",
+       y = "Expression (Z-score)")
+
+# GSE81292 (Z-score normalized)
+p_81292 <- ggplot(expr_81292_norm, aes(x = Condition, y = Expression_zscore, fill = Condition)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitter(width = 0.2),
+             size = 2, alpha = 0.6, shape = 21, color = "black", stroke = 0.3) +
+  stat_compare_means(comparisons = comparisons, method = "t.test", label = "p.signif") +
+  facet_wrap(~ Gene, scales = "free_y", nrow = 2) +
+  scale_fill_manual(values = c("#0073C2FF", "#EFC000FF")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) + 
+  labs(title = "GSE81292 - Gene Expression (Z-score Normalized)",
+       y = "Expression (Z-score)")
+
+# Save individual plots
+ggsave("expression_plots/GSE76808_genes_zscore.png", plot = p_76808, width = 9, height = 6, dpi = 300)
+ggsave("expression_plots/GSE48149_genes_zscore.png", plot = p_48149, width = 9, height = 6, dpi = 300)
+ggsave("expression_plots/GSE81292_genes_zscore.png", plot = p_81292, width = 9, height = 6, dpi = 300)
+
+print(p_76808)
+print(p_48149)
+print(p_81292)
+```
+
+# Summary:
+
+## Z-score Normalization
+- Transforms each gene within each dataset to have mean=0 and SD=1
+- Makes cross-platform comparisons valid while preserving relative differences
+- Solves the problem of Illumina dataset having much higher raw expression values
+
+## Improved Point Display
+- Points are now positioned over their respective conditions (control or SSc-ILD)
+- Uses `position_jitterdodge()` for the combined plot to properly dodge by condition
+- Uses `position_jitter()` for individual plots
+- Points are semi-transparent with black outlines for better visibility
+
+## Output Files:
+- `combined_genes_zscore.png` - Main plot showing all 3 studies for each gene
+- `GSE76808_genes_zscore.png` - Individual GSE76808 plot
+- `GSE48149_genes_zscore.png` - Individual GSE48149 plot  
+- `GSE81292_genes_zscore.png` - Individual GSE81292 plot
+
+## Key Features:
+- Control always on the left, SSc-ILD on the right
+- Each gene in its own panel
+- All three studies visible side-by-side
+- Statistical significance testing (t-test)
+- Properly positioned jitter points over their respective conditions

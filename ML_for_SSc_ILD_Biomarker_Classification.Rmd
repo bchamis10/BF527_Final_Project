@@ -1,0 +1,363 @@
+---
+title: "Machine Learning for SSc-ILD Biomarker Classification"
+output: html_document
+---
+```{r setup, message=FALSE, warning=FALSE}
+# ---- Load packages ----
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(caret)           # Machine learning framework
+library(randomForest)    # Random Forest
+library(e1071)           # SVM
+library(pROC)            # ROC curves
+library(pheatmap)        # Heatmaps
+
+set.seed(42)  # For reproducibility
+
+# ---- Create output directories ----
+dir.create("ML_plots", showWarnings = FALSE)
+dir.create("ML_tables", showWarnings = FALSE)
+cat("✓ Output directories created: ML_plots/ and ML_tables/\n\n")
+```
+
+### run after running Boxplots_v2_claude.Rmd
+```{r prepare-and-normalize-data}
+# ---- Prepare and NORMALIZE data ----
+
+cat("=== DATA PREPARATION AND NORMALIZATION ===\n\n")
+
+# GSE76808 - all genes with LOG2 TRANSFORMATION
+GSE76808_all <- GSE76808_mapped %>%
+  dplyr::select(-ProbeID) %>%
+  group_by(Gene) %>%
+  summarize(across(where(is.numeric), mean), .groups = "drop")
+
+GSE76808_all_long <- GSE76808_all %>%
+  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Expression") %>%
+  left_join(metadata, by = "Sample") %>%
+  filter(!is.na(Condition)) %>%
+  mutate(Expression = log2(Expression + 1))
+
+# GSE48149 - all genes with LOG2 TRANSFORMATION
+GSE48149_all <- GSE48149_mapped %>%
+  dplyr::select(-ProbeID) %>%
+  group_by(Gene) %>%
+  summarize(across(where(is.numeric), mean), .groups = "drop")
+
+GSE48149_all_long <- GSE48149_all %>%
+  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Expression") %>%
+  left_join(metadata, by = "Sample") %>%
+  filter(!is.na(Condition)) %>%
+  mutate(Expression = log2(Expression + 1))
+
+# GSE81292 - all genes with LOG2 TRANSFORMATION
+GSE81292_all <- GSE81292_mapped %>%
+  dplyr::select(-ProbeID) %>%
+  group_by(Gene) %>%
+  summarize(across(where(is.numeric), mean), .groups = "drop")
+
+GSE81292_all_long <- GSE81292_all %>%
+  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Expression") %>%
+  left_join(metadata, by = "Sample") %>%
+  filter(!is.na(Condition)) %>%
+  mutate(Expression = log2(Expression + 1))
+
+cat("✓ Data log2-transformed\n\n")
+```
+```{r prepare-ml-datasets}
+# ---- Prepare ML datasets ----
+
+cat("=== PREPARING ML DATA ===\n\n")
+
+prepare_ml_data <- function(expr_long, dataset_name) {
+  expr_wide <- expr_long %>%
+    dplyr::select(Gene, Sample, Expression, Condition) %>%
+    pivot_wider(names_from = Gene, values_from = Expression) %>%
+    mutate(Dataset = dataset_name,
+           Condition = factor(Condition, levels = c("control", "SSc-ILD"),
+                            labels = c("control", "SSc_ILD"))) %>%
+    filter(!is.na(Condition))
+  return(expr_wide)
+}
+
+ml_76808 <- prepare_ml_data(GSE76808_all_long, "GSE76808")
+ml_48149 <- prepare_ml_data(GSE48149_all_long, "GSE48149")
+ml_81292 <- prepare_ml_data(GSE81292_all_long, "GSE81292")
+
+# Find common genes across all datasets
+common_genes <- Reduce(intersect, list(
+  setdiff(colnames(ml_76808), c("Sample", "Condition", "Dataset")),
+  setdiff(colnames(ml_48149), c("Sample", "Condition", "Dataset")),
+  setdiff(colnames(ml_81292), c("Sample", "Condition", "Dataset"))
+))
+
+# Keep only common genes
+ml_76808 <- ml_76808 %>% dplyr::select(Sample, Condition, Dataset, all_of(common_genes))
+ml_48149 <- ml_48149 %>% dplyr::select(Sample, Condition, Dataset, all_of(common_genes))
+ml_81292 <- ml_81292 %>% dplyr::select(Sample, Condition, Dataset, all_of(common_genes))
+
+cat("✓ Data preparation complete\n\n")
+```
+```{r z-score-scaling}
+# ---- Z-score scaling by dataset ----
+
+cat("=== Z-SCORE SCALING ===\n\n")
+
+ml_combined <- bind_rows(ml_76808, ml_48149, ml_81292)
+
+ml_scaled <- ml_combined %>%
+  group_by(Dataset) %>%
+  mutate(across(all_of(common_genes), ~scale(.)[,1])) %>%
+  ungroup()
+
+ml_76808 <- ml_scaled %>% filter(Dataset == "GSE76808")
+ml_48149 <- ml_scaled %>% filter(Dataset == "GSE48149")
+ml_81292 <- ml_scaled %>% filter(Dataset == "GSE81292")
+
+cat("✓ Z-score scaling complete\n\n")
+```
+```{r cross-dataset-validation}
+# ---- Cross-Dataset Validation with Train-Only Feature Selection ----
+
+cat("=== CROSS-DATASET VALIDATION ===\n\n")
+
+genes_of_interest <- c("MMP7", "KRT17", "SPP1", "GDF15", "CDKN2A", "FRZB", "PDE1A", "NAP1L2")
+
+select_features_train_only <- function(train_data, train_long, n_top = 30) {
+  de_train <- train_long %>%
+    filter(Gene %in% common_genes) %>%
+    group_by(Gene) %>%
+    filter(n() >= 6) %>%
+    summarize(
+      mean_control = mean(Expression[Condition == "control"], na.rm = TRUE),
+      mean_ssc = mean(Expression[Condition == "SSc-ILD"], na.rm = TRUE),
+      log2_fold_change = mean_ssc - mean_control,
+      p_value = tryCatch({
+        t.test(Expression ~ Condition)$p.value
+      }, error = function(e) NA),
+      .groups = "drop"
+    ) %>%
+    mutate(abs_log2_fc = abs(log2_fold_change)) %>%
+    filter(!is.na(p_value), p_value < 0.05) %>%
+    arrange(desc(abs_log2_fc))
+  
+  hypothesis_genes_present <- intersect(genes_of_interest, de_train$Gene)
+  selected <- unique(c(hypothesis_genes_present, head(de_train$Gene, n_top)))
+  
+  return(list(
+    genes = selected,
+    n_hypothesis = length(hypothesis_genes_present),
+    n_de = nrow(de_train)
+  ))
+}
+
+cross_validate_proper <- function(train_data, train_long, test_data, train_name, test_name) {
+  cat("Train:", train_name, "| Test:", test_name, "\n")
+  
+  feature_info <- select_features_train_only(train_data, train_long)
+  selected_genes <- feature_info$genes
+  
+  X_train <- train_data %>% dplyr::select(all_of(selected_genes)) %>% as.data.frame()
+  y_train <- train_data$Condition
+  X_test <- test_data %>% dplyr::select(all_of(selected_genes)) %>% as.data.frame()
+  y_test <- test_data$Condition
+  
+  rf_model <- randomForest(x = X_train, y = y_train, ntree = 500, importance = TRUE)
+  rf_pred <- predict(rf_model, X_test, type = "prob")[, "SSc_ILD"]
+  rf_roc <- roc(y_test, rf_pred, levels = c("control", "SSc_ILD"), direction = "<", quiet = TRUE)
+  
+  svm_model <- svm(x = X_train, y = y_train, kernel = "radial", probability = TRUE)
+  svm_pred <- attr(predict(svm_model, X_test, probability = TRUE), "probabilities")[, "SSc_ILD"]
+  svm_roc <- roc(y_test, svm_pred, levels = c("control", "SSc_ILD"), direction = "<", quiet = TRUE)
+  
+  cat("  RF AUC:", round(auc(rf_roc), 3), "| SVM AUC:", round(auc(svm_roc), 3), "\n\n")
+  
+  return(list(
+    train = train_name,
+    test = test_name,
+    rf_roc = rf_roc,
+    svm_roc = svm_roc,
+    rf_model = rf_model,
+    selected_genes = selected_genes,
+    feature_info = feature_info
+  ))
+}
+
+# Perform all cross-validations
+cross_76808_48149 <- cross_validate_proper(ml_76808, GSE76808_all_long, ml_48149, "GSE76808", "GSE48149")
+cross_76808_81292 <- cross_validate_proper(ml_76808, GSE76808_all_long, ml_81292, "GSE76808", "GSE81292")
+cross_48149_76808 <- cross_validate_proper(ml_48149, GSE48149_all_long, ml_76808, "GSE48149", "GSE76808")
+cross_48149_81292 <- cross_validate_proper(ml_48149, GSE48149_all_long, ml_81292, "GSE48149", "GSE81292")
+cross_81292_76808 <- cross_validate_proper(ml_81292, GSE81292_all_long, ml_76808, "GSE81292", "GSE76808")
+cross_81292_48149 <- cross_validate_proper(ml_81292, GSE81292_all_long, ml_48149, "GSE81292", "GSE48149")
+
+# Collect results
+cross_auc <- data.frame(
+  Train = c("GSE76808", "GSE76808", "GSE48149", "GSE48149", "GSE81292", "GSE81292"),
+  Test = c("GSE48149", "GSE81292", "GSE76808", "GSE81292", "GSE76808", "GSE48149"),
+  RF_AUC = c(auc(cross_76808_48149$rf_roc), auc(cross_76808_81292$rf_roc),
+             auc(cross_48149_76808$rf_roc), auc(cross_48149_81292$rf_roc),
+             auc(cross_81292_76808$rf_roc), auc(cross_81292_48149$rf_roc)),
+  SVM_AUC = c(auc(cross_76808_48149$svm_roc), auc(cross_76808_81292$svm_roc),
+              auc(cross_48149_76808$svm_roc), auc(cross_48149_81292$svm_roc),
+              auc(cross_81292_76808$svm_roc), auc(cross_81292_48149$svm_roc))
+)
+
+print(cross_auc)
+```
+```{r plot-roc-curves}
+# ---- Plot ROC Curves ----
+
+png("ML_plots/roc_cross_dataset.png", width = 10, height = 6, units = "in", res = 300)
+par(mfrow = c(2, 3))
+
+plot(cross_76808_48149$rf_roc, main = "Train: GSE76808 → Test: GSE48149", col = "red", lwd = 2)
+legend("bottomright", legend = paste("AUC =", round(auc(cross_76808_48149$rf_roc), 3)), cex = 0.8)
+
+plot(cross_76808_81292$rf_roc, main = "Train: GSE76808 → Test: GSE81292", col = "red", lwd = 2)
+legend("bottomright", legend = paste("AUC =", round(auc(cross_76808_81292$rf_roc), 3)), cex = 0.8)
+
+plot(cross_48149_76808$rf_roc, main = "Train: GSE48149 → Test: GSE76808", col = "blue", lwd = 2)
+legend("bottomright", legend = paste("AUC =", round(auc(cross_48149_76808$rf_roc), 3)), cex = 0.8)
+
+plot(cross_48149_81292$rf_roc, main = "Train: GSE48149 → Test: GSE81292", col = "blue", lwd = 2)
+legend("bottomright", legend = paste("AUC =", round(auc(cross_48149_81292$rf_roc), 3)), cex = 0.8)
+
+plot(cross_81292_76808$rf_roc, main = "Train: GSE81292 → Test: GSE76808", col = "green", lwd = 2)
+legend("bottomright", legend = paste("AUC =", round(auc(cross_81292_76808$rf_roc), 3)), cex = 0.8)
+
+plot(cross_81292_48149$rf_roc, main = "Train: GSE81292 → Test: GSE48149", col = "green", lwd = 2)
+legend("bottomright", legend = paste("AUC =", round(auc(cross_81292_48149$rf_roc), 3)), cex = 0.8)
+
+dev.off()
+cat("✓ Saved: ML_plots/roc_cross_dataset.png\n\n")
+```
+```{r aggregated-importance}
+# ---- Aggregated Feature Importance ----
+
+cat("=== AGGREGATED FEATURE IMPORTANCE ===\n\n")
+
+get_importance <- function(model, model_name) {
+  data.frame(
+    Gene = rownames(importance(model)),
+    Importance = importance(model)[, "MeanDecreaseAccuracy"],
+    Model = model_name
+  )
+}
+
+all_importance <- bind_rows(
+  get_importance(cross_76808_48149$rf_model, "GSE76808→GSE48149"),
+  get_importance(cross_76808_81292$rf_model, "GSE76808→GSE81292"),
+  get_importance(cross_48149_76808$rf_model, "GSE48149→GSE76808"),
+  get_importance(cross_48149_81292$rf_model, "GSE48149→GSE81292"),
+  get_importance(cross_81292_76808$rf_model, "GSE81292→GSE76808"),
+  get_importance(cross_81292_48149$rf_model, "GSE81292→GSE48149")
+)
+
+aggregated_importance <- all_importance %>%
+  group_by(Gene) %>%
+  summarize(
+    Mean_Importance = mean(Importance),
+    SD_Importance = sd(Importance),
+    Times_Selected = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Mean_Importance))
+
+# Find core genes (selected in all 6 models)
+core_genes <- aggregated_importance %>%
+  filter(Times_Selected == 6)
+
+cat("Core genes (6/6 models):", nrow(core_genes), "\n")
+print(core_genes)
+
+# Check hypothesis genes
+hypothesis_importance <- aggregated_importance %>%
+  filter(Gene %in% genes_of_interest)
+
+cat("\nHypothesis genes:\n")
+print(hypothesis_importance)
+```
+```{r honest-feature-plot}
+# ---- Honest Feature Importance Plot ----
+
+cat("=== CREATING FEATURE IMPORTANCE PLOT ===\n\n")
+
+# Top 15 + all hypothesis genes
+top_genes <- head(aggregated_importance, 15)
+hypothesis_genes_data <- aggregated_importance %>%
+  filter(Gene %in% genes_of_interest)
+
+genes_to_show <- bind_rows(top_genes, hypothesis_genes_data) %>%
+  distinct(Gene, .keep_all = TRUE) %>%
+  arrange(desc(Mean_Importance))
+
+p_honest <- genes_to_show %>%
+  mutate(
+    Fill_Color = case_when(
+      Gene == "MMP7" ~ "MMP7 (6/6 models)",
+      Gene %in% genes_of_interest ~ "Other Hypothesis",
+      TRUE ~ "Data-Driven Discovery"
+    ),
+    Label = if_else(Gene %in% genes_of_interest, paste0(Gene, " ★"), Gene)
+  ) %>%
+  ggplot(aes(x = reorder(Label, Mean_Importance), y = Mean_Importance, fill = Fill_Color)) +
+  geom_col(alpha = 0.85) +
+  geom_errorbar(aes(ymin = Mean_Importance - SD_Importance,
+                    ymax = Mean_Importance + SD_Importance),
+                width = 0.2, alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", alpha = 0.5) +
+  scale_fill_manual(
+    values = c(
+      "MMP7 (6/6 models)" = "#D32F2F",
+      "Other Hypothesis" = "#FF7043",
+      "Data-Driven Discovery" = "#1976D2"
+    ),
+    name = "Gene Category"
+  ) +
+  coord_flip() +
+  theme_bw() +
+  labs(
+    title = "Feature Importance: Top 15 + Hypothesis Genes",
+    subtitle = "Mean importance ± SD across 6 models | ★ = Hypothesis genes",
+    x = "Gene",
+    y = "Mean Importance Score"
+  ) +
+  theme(legend.position = "bottom", axis.text.y = element_text(size = 9))
+
+ggsave("ML_plots/feature_importance.png", p_honest,
+       width = 10, height = max(8, nrow(genes_to_show) * 0.35), dpi = 300)
+
+print(p_honest)
+cat("✓ Feature importance plot saved\n\n")
+```
+```{r save-tables}
+# ---- Save Tables ----
+
+write.csv(cross_auc, "ML_tables/cross_validation_results.csv", row.names = FALSE)
+write.csv(aggregated_importance, "ML_tables/aggregated_feature_importance.csv", row.names = FALSE)
+write.csv(core_genes, "ML_tables/core_genes_6of6.csv", row.names = FALSE)
+write.csv(hypothesis_importance, "ML_tables/hypothesis_genes_importance.csv", row.names = FALSE)
+
+cat("✓ All tables saved\n\n")
+```
+```{r summary}
+# ---- Summary ----
+
+cat("═══════════════════════════════════════════════════════════\n")
+cat("                    ANALYSIS COMPLETE                      \n")
+cat("═══════════════════════════════════════════════════════════\n\n")
+
+cat("Mean AUC:", round(mean(cross_auc$RF_AUC), 3), "±", round(sd(cross_auc$RF_AUC), 3), "\n")
+cat("Core genes (6/6 models):", nrow(core_genes), "\n")
+cat("Hypothesis gene MMP7: Rank", which(aggregated_importance$Gene == "MMP7"), 
+    "| Selected", hypothesis_importance$Times_Selected[hypothesis_importance$Gene == "MMP7"], "/6 models\n\n")
+
+cat("Output files created:\n")
+cat("  ML_plots/roc_cross_dataset.png\n")
+cat("  ML_plots/feature_importance.png\n")
+cat("  ML_tables/ (4 CSV files)\n\n")
+
+cat("═══════════════════════════════════════════════════════════\n\n")
+```
